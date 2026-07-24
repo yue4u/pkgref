@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
-import { constants } from "node:fs";
-import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import { parseArgs } from "node:util";
+import { parseArgs, promisify } from "node:util";
 import { cancel, confirm, isCancel, multiselect, note, text } from "@clack/prompts";
 import packageJson from "../package.json" with { type: "json" };
 import {
@@ -19,82 +18,50 @@ import {
   renderAgentsReference,
   renderIndex,
   repositoryFromMetadata,
-  type IndexRepository,
-  type RegistryPackage,
-  type RepositoryGroup,
 } from "./core.ts";
+import type { IndexRepository, RegistryPackage, RepositoryGroup } from "./types.ts";
 
-interface CliOptions {
-  cwd: string;
-  directory?: string;
-  packages?: string;
-}
-
-interface CommandResult {
-  code: number;
-  stderr: string;
-  stdout: string;
-}
-
-interface ProcessedRepository {
-  index?: IndexRepository;
-  failed: boolean;
-}
-
+const exec = promisify(execFile);
+const DEFAULT_DIR = "docs/pkg-reference";
+const CANCELLED = Symbol("cancelled");
+const OPTIONS = {
+  dir: { type: "string" },
+  help: { type: "boolean", short: "h" },
+  pkgs: { type: "string" },
+  version: { type: "boolean", short: "v" },
+} as const;
 const HELP = `pkgref - clone package source references
 
 Usage:
   pkgref [--pkgs=<name,...>] [--dir=<path>]
   pkgref update [--dir=<path>]
-  pkgref --help
-  pkgref --version
 
 Options:
   --pkgs  Comma-separated packages. Undeclared packages are allowed with a warning.
-  --dir   Target directory (default: docs/pkg-reference).
-  --help  Show this help.
-  --version  Show the installed version.
+  --dir   Target directory (default: ${DEFAULT_DIR}).
+  -h, --help  Show this help.
+  -v, --version  Show the installed version.
 
 Commands:
   update  Fast-forward all cloned repositories to their latest upstream revision.
 `;
 
-export async function runCli(argv = process.argv.slice(2), cwd = process.cwd()): Promise<number> {
-  let values: {
-    dir?: string;
-    help?: boolean;
-    pkgs?: string;
-    version?: boolean;
-  };
-  let positionals: string[];
+export async function runCli(argv = process.argv.slice(2), cwd = process.cwd()) {
   try {
-    ({ values, positionals } = parseArgs({
+    const { values, positionals } = parseArgs({
       args: argv,
       allowPositionals: true,
-      options: {
-        dir: { type: "string" },
-        help: { type: "boolean", short: "h" },
-        pkgs: { type: "string" },
-        version: { type: "boolean", short: "v" },
-      },
+      options: OPTIONS,
       strict: true,
-    }));
-  } catch (error) {
-    console.error(`Error: ${errorMessage(error)}`);
-    console.error("Run pkgref --help for usage.");
-    return 1;
-  }
-
-  if (values.help) {
-    console.log(HELP);
-    return 0;
-  }
-  if (values.version) {
-    console.log(packageJson.version);
-    return 0;
-  }
-
-  try {
+    });
+    if (values.help) {
+      console.log(HELP);
+      return 0;
+    }
+    if (values.version) {
+      console.log(packageJson.version);
+      return 0;
+    }
     if (positionals.length > 1 || (positionals[0] && positionals[0] !== "update")) {
       throw new Error(`unknown command: ${positionals.join(" ")}`);
     }
@@ -102,194 +69,133 @@ export async function runCli(argv = process.argv.slice(2), cwd = process.cwd()):
       if (values.pkgs !== undefined) {
         throw new Error("--pkgs cannot be used with the update command");
       }
-      return await updateRepositories(cwd, values.dir);
+      return await updateRepositories(resolve(cwd, values.dir ?? DEFAULT_DIR));
     }
-
-    return await execute({
-      cwd,
-      directory: values.dir,
-      packages: values.pkgs,
-    });
+    return await cloneRepositories(cwd, values.pkgs, values.dir);
   } catch (error) {
+    if (error === CANCELLED) {
+      return 0;
+    }
     console.error(`Error: ${errorMessage(error)}`);
     return 1;
   }
 }
 
-async function updateRepositories(cwd: string, directory?: string): Promise<number> {
-  const targetRoot = resolve(cwd, directory ?? "docs/pkg-reference");
-  if (!(await pathExists(targetRoot))) {
-    console.log(`No package reference directory found at ${targetRoot}.`);
+async function updateRepositories(target: string) {
+  if (!(await exists(target))) {
+    console.log(`No package reference directory found at ${target}.`);
     return 0;
   }
 
-  const entries = await readdir(targetRoot, { withFileTypes: true });
   const repositories: string[] = [];
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (entry.isDirectory() && (await pathExists(join(targetRoot, entry.name, ".git")))) {
+  for (const entry of await readdir(target, { withFileTypes: true })) {
+    if (entry.isDirectory() && (await exists(join(target, entry.name, ".git")))) {
       repositories.push(entry.name);
     }
   }
+  repositories.sort();
 
-  if (repositories.length === 0) {
-    console.log(`No cloned repositories found in ${targetRoot}.`);
+  if (!repositories.length) {
+    console.log(`No cloned repositories found in ${target}.`);
     return 0;
   }
 
-  let failed = false;
-  let updated = 0;
-  for (const repository of repositories) {
-    const repositoryRoot = join(targetRoot, repository);
-    const status = await runCommand("git", ["-C", repositoryRoot, "status", "--porcelain"]);
-    if (status.code !== 0) {
-      console.error(`Failed to inspect ${repository}: ${commandError(status)}`);
-      failed = true;
-      continue;
-    }
-    if (status.stdout.trim()) {
-      console.warn(`Skipped ${repository}: the worktree has local changes.`);
-      failed = true;
-      continue;
-    }
-
-    console.log(`Updating ${repository}...`);
-    const pull = await runCommand("git", ["-C", repositoryRoot, "pull", "--ff-only", "--prune"]);
-    if (pull.code !== 0) {
-      console.error(`Failed to update ${repository}: ${commandError(pull)}`);
-      failed = true;
-      continue;
-    }
-    updated += 1;
-    console.log(`Updated ${repository}.`);
-  }
-
+  const updates = await Promise.all(
+    repositories.map((name) => pullRepository(join(target, name), name, true)),
+  );
+  const updated = updates.filter((result) => result === "updated").length;
+  const failed = updated !== repositories.length;
   console.log(
     `Finished: ${updated} of ${repositories.length} repositories updated${failed ? " with errors" : ""}.`,
   );
   return failed ? 1 : 0;
 }
 
-async function execute(options: CliOptions): Promise<number> {
-  const manifestPath = join(options.cwd, "package.json");
-  const manifest = await readManifest(manifestPath);
-  const declaredPackages = discoverDependencies(manifest);
-  const interactive = options.packages === undefined;
-  let selectedPackages: string[];
-  let addReferenceToAgents = false;
-  let targetDirectory = options.directory;
+async function cloneRepositories(cwd: string, packageArgument?: string, directory?: string) {
+  const manifestPath = join(cwd, "package.json");
+  const declared = discoverDependencies(await readManifest(manifestPath));
+  const interactive = packageArgument === undefined;
+  let addToAgents = false;
+  const packages = interactive ? await selectPackages(declared) : parsePackageList(packageArgument);
 
   if (!interactive) {
-    // `interactive` guarantees this value is present.
-    const packageArgument = options.packages ?? "";
-    selectedPackages = parsePackageList(packageArgument);
-    if (selectedPackages.length === 0) {
+    if (!packages.length) {
       throw new Error("--pkgs must contain at least one package name");
     }
-    const declared = new Set(declaredPackages);
-    for (const packageName of selectedPackages) {
-      if (!declared.has(packageName)) {
-        console.warn(
-          `Warning: "${packageName}" is not declared in ${manifestPath}; resolving it anyway.`,
-        );
-      }
-    }
-  } else {
-    if (!process.stdin.isTTY || !process.stdout.isTTY) {
-      throw new Error("--pkgs is required when pkgref is not running in an interactive terminal");
-    }
-    if (declaredPackages.length === 0) {
-      console.log("No dependencies found in package.json.");
-      return 0;
-    }
-    const selection = await promptForPackages(declaredPackages);
-    if (selection === null) {
-      return 0;
-    }
-    selectedPackages = selection;
-    if (selectedPackages.length === 0) {
-      console.log("No packages selected.");
-      return 0;
+    for (const name of packages.filter((name) => !declared.includes(name))) {
+      console.warn(`Warning: "${name}" is not declared in ${manifestPath}; resolving it anyway.`);
     }
   }
 
-  const resolutionResults = await Promise.all(
-    selectedPackages.map(async (name) => {
-      try {
-        return { name, repository: await resolvePackageRepository(name) };
-      } catch (error) {
-        console.error(`Failed to resolve ${name}: ${errorMessage(error)}`);
-        return { name, error: true as const };
-      }
-    }),
-  );
-  const resolved = resolutionResults.filter(
-    (
-      result,
-    ): result is {
-      name: string;
-      repository: ReturnType<typeof normalizeRepository>;
-    } => "repository" in result,
-  );
-  let failed = resolved.length !== selectedPackages.length;
-
+  const resolved = (
+    await Promise.all(
+      packages.map(async (name) => {
+        try {
+          return { name, repository: await resolveRepository(name, cwd) };
+        } catch (error) {
+          console.error(`Failed to resolve ${name}: ${errorMessage(error)}`);
+          return null;
+        }
+      }),
+    )
+  ).filter((item): item is NonNullable<typeof item> => item !== null);
+  let failed = resolved.length !== packages.length;
   const groups = groupRepositories(resolved);
-  if (groups.length === 0) {
+  if (!groups.length) {
     return failed ? 1 : 0;
   }
 
   if (interactive) {
-    const confirmed = await promptForRepositoryConfirmation(groups);
-    if (!confirmed) {
-      return 0;
-    }
-
-    if (targetDirectory === undefined) {
-      const directory = await promptForTargetDirectory();
-      if (directory === null) {
-        return 0;
-      }
-      targetDirectory = directory;
-    }
-
-    const addReference = await promptForAgentsReference();
-    if (addReference === null) {
-      return 0;
-    }
-    addReferenceToAgents = addReference;
+    await confirmRepositories(groups);
+    const chosenDirectory =
+      directory ??
+      (await ask(
+        text({
+          message: "Where should package references be stored?",
+          initialValue: DEFAULT_DIR,
+          validate: (value) => (!value?.trim() ? "Target directory is required." : undefined),
+        }),
+      ));
+    directory = chosenDirectory.trim();
+    addToAgents = await confirmChoice("Add the package reference index to AGENTS.md?");
   }
 
-  const targetRoot = resolve(options.cwd, targetDirectory ?? "docs/pkg-reference");
-  const indexPath = join(targetRoot, "INDEX.md");
+  const target = resolve(cwd, directory ?? DEFAULT_DIR);
+  const indexPath = join(target, "INDEX.md");
   const existingIndex = await readOwnedIndex(indexPath);
-  await mkdir(targetRoot, { recursive: true });
+  await mkdir(target, { recursive: true });
 
-  const indexRepositories: IndexRepository[] = [];
+  const indexed: IndexRepository[] = [];
   for (const group of groups) {
-    const processed = await processRepository(group, targetRoot);
-    failed ||= processed.failed;
-    if (processed.index) {
-      indexRepositories.push(processed.index);
+    const result = await processRepository(group, target);
+    failed ||= result.failed;
+    if (result.index) {
+      indexed.push(result.index);
     }
   }
 
-  const generatedIndex = await renderIndex(indexRepositories, targetRoot);
-  const index = existingIndex ? mergeIndexes(existingIndex, generatedIndex) : generatedIndex;
-  await writeFile(indexPath, index, "utf8");
+  const generated = await renderIndex(indexed, target);
+  await writeFile(indexPath, existingIndex ? mergeIndexes(existingIndex, generated) : generated);
   console.log(`Wrote ${indexPath}`);
-  if (addReferenceToAgents) {
-    await addAgentsReference(options.cwd, indexPath);
+  if (addToAgents) {
+    await addAgentsReference(cwd, indexPath);
   }
   console.log(
-    `Finished: ${indexRepositories.length} repositories indexed, ${failed ? "with errors" : "successfully"}.`,
+    `Finished: ${indexed.length} repositories indexed, ${failed ? "with errors" : "successfully"}.`,
   );
   return failed ? 1 : 0;
 }
 
-async function resolvePackageRepository(packageName: string) {
-  const encodedName = encodeURIComponent(packageName);
-  const response = await fetch(`https://registry.npmjs.org/${encodedName}/latest`, {
-    headers: { accept: "application/json" },
-  });
+export async function resolveRepository(packageName: string, cwd: string) {
+  const installedManifest = join(cwd, "node_modules", packageName, "package.json");
+  if (await exists(installedManifest)) {
+    return repositoryFromMetadata(await readManifest(installedManifest));
+  }
+
+  const response = await fetch(
+    `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
+    { headers: { accept: "application/json" } },
+  );
   if (!response.ok) {
     throw new Error(`npm registry returned ${response.status} ${response.statusText}`);
   }
@@ -298,248 +204,189 @@ async function resolvePackageRepository(packageName: string) {
 
 async function processRepository(
   group: RepositoryGroup,
-  targetRoot: string,
-): Promise<ProcessedRepository> {
-  const destination = join(targetRoot, group.name);
+  target: string,
+): Promise<{ failed: boolean; index?: IndexRepository }> {
+  const root = join(target, group.name);
+  const index = { directory: group.name, packages: group.packages, root };
 
-  if (!(await pathExists(destination))) {
+  if (!(await exists(root))) {
     console.log(`Cloning ${group.name} (${group.packages.join(", ")})...`);
-    const result = await runCommand("git", [
-      "clone",
-      "--depth",
-      "1",
-      "--",
-      group.cloneUrl,
-      destination,
-    ]);
-    if (result.code !== 0) {
-      await removeFailedClone(destination);
-      console.error(`Failed to clone ${group.name}: ${commandError(result)}`);
+    const result = await git(["clone", "--depth", "1", "--", group.cloneUrl, root]);
+    if (!result.ok) {
+      console.error(`Failed to clone ${group.name}: ${result.output}`);
       return { failed: true };
     }
-    return {
-      failed: false,
-      index: { directory: group.name, packages: group.packages, root: destination },
-    };
+    return { failed: false, index };
   }
 
-  const validClone = await validateExistingClone(destination, group);
-  if (!validClone.valid) {
-    console.warn(`Skipping ${group.name}: ${validClone.reason}`);
+  const invalidReason = await invalidCloneReason(root, group);
+  if (invalidReason) {
+    console.warn(`Skipping ${group.name}: ${invalidReason}`);
     return { failed: false };
   }
-
-  let update = false;
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    update = await promptForUpdate(group.name);
-  }
-  if (update) {
-    const status = await runCommand("git", ["-C", destination, "status", "--porcelain"]);
-    if (status.code !== 0) {
-      console.warn(`Skipping update for ${group.name}: ${commandError(status)}`);
-      return {
-        failed: true,
-        index: { directory: group.name, packages: group.packages, root: destination },
-      };
-    } else if (status.stdout.trim()) {
-      console.warn(`Skipping update for ${group.name}: the worktree has local changes.`);
-    } else {
-      const pull = await runCommand("git", ["-C", destination, "pull", "--ff-only"]);
-      if (pull.code !== 0) {
-        console.error(`Failed to update ${group.name}: ${commandError(pull)}`);
-        return {
-          failed: true,
-          index: { directory: group.name, packages: group.packages, root: destination },
-        };
-      }
-      console.log(`Updated ${group.name}.`);
-    }
-  } else {
+  if (!process.stdin.isTTY || !process.stdout.isTTY || !(await confirmUpdate(group.name))) {
     console.log(`Skipped update for ${group.name}.`);
+    return { failed: false, index };
   }
 
-  return {
-    failed: false,
-    index: { directory: group.name, packages: group.packages, root: destination },
-  };
+  const update = await pullRepository(root, group.name);
+  return { failed: update === "failed", index };
 }
 
-async function validateExistingClone(
-  destination: string,
-  expected: RepositoryGroup,
-): Promise<{ reason?: string; valid: boolean }> {
-  const directoryStat = await stat(destination);
-  if (!directoryStat.isDirectory()) {
-    return { valid: false, reason: "the destination exists and is not a directory" };
+async function pullRepository(root: string, name: string, prune = false) {
+  const status = await git(["status", "--porcelain"], root);
+  if (!status.ok) {
+    console.error(`Failed to inspect ${name}: ${status.output}`);
+    return "failed" as const;
+  }
+  if (status.output) {
+    console.warn(`Skipped ${name}: the worktree has local changes.`);
+    return "dirty" as const;
   }
 
-  const origin = await runCommand("git", ["-C", destination, "remote", "get-url", "origin"]);
-  if (origin.code !== 0) {
-    return { valid: false, reason: "the destination is not a Git clone with an origin" };
+  console.log(`Updating ${name}...`);
+  const pull = await git(["pull", "--ff-only", ...(prune ? ["--prune"] : [])], root);
+  if (!pull.ok) {
+    console.error(`Failed to update ${name}: ${pull.output}`);
+    return "failed" as const;
   }
+  console.log(`Updated ${name}.`);
+  return "updated" as const;
+}
 
+async function invalidCloneReason(root: string, expected: RepositoryGroup) {
+  const origin = await git(["remote", "get-url", "origin"], root);
+  if (!origin.ok) {
+    return "the destination is not a Git clone with an origin";
+  }
   try {
-    const actual = normalizeRepository(origin.stdout.trim());
-    if (actual.key !== expected.key) {
-      return { valid: false, reason: "the existing clone has a different origin" };
-    }
+    return normalizeRepository(origin.output).key === expected.key
+      ? undefined
+      : "the existing clone has a different origin";
   } catch (error) {
-    return { valid: false, reason: `cannot read its origin: ${errorMessage(error)}` };
+    return `cannot read its origin: ${errorMessage(error)}`;
   }
-
-  return { valid: true };
 }
 
-async function readOwnedIndex(indexPath: string): Promise<string | undefined> {
-  if (!(await pathExists(indexPath))) {
+async function readOwnedIndex(path: string) {
+  const contents = await readOptional(path);
+  if (contents === undefined) {
     return undefined;
   }
-  const contents = await readFile(indexPath, "utf8");
   if (!contents.startsWith(INDEX_MARKER)) {
-    throw new Error(`refusing to overwrite user-owned index at ${indexPath}`);
+    throw new Error(`refusing to overwrite user-owned index at ${path}`);
   }
   return contents;
 }
 
-async function promptForPackages(packages: string[]): Promise<string[] | null> {
-  const selection = await multiselect({
-    message: "Select packages to clone",
-    options: packages.map((packageName) => ({
-      label: packageName,
-      value: packageName,
-    })),
-    required: false,
-    maxItems: 10,
-  });
-
-  if (isCancel(selection)) {
-    cancel("Operation cancelled.");
-    return null;
+async function selectPackages(packages: string[]) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("--pkgs is required when pkgref is not running in an interactive terminal");
   }
-
-  return selection;
+  if (!packages.length) {
+    stop("No dependencies found in package.json.");
+  }
+  const selected = await ask(
+    multiselect({
+      message: "Select packages to clone",
+      options: packages.map((value) => ({ label: value, value })),
+      required: false,
+      maxItems: 10,
+    }),
+  );
+  if (!selected.length) {
+    stop("No packages selected.");
+  }
+  return selected;
 }
 
-async function promptForUpdate(repository: string): Promise<boolean> {
-  const update = await confirm({
-    message: `${repository} already exists. Update it?`,
-    initialValue: false,
-  });
-
-  if (isCancel(update)) {
-    cancel("Update skipped.");
-    return false;
-  }
-
-  return update;
-}
-
-async function promptForTargetDirectory(): Promise<string | null> {
-  const directory = await text({
-    message: "Where should package references be stored?",
-    initialValue: "docs/pkg-reference",
-    validate(value) {
-      if (!value?.trim()) {
-        return "Target directory is required.";
-      }
-    },
-  });
-
-  if (isCancel(directory)) {
-    cancel("Operation cancelled.");
-    return null;
-  }
-
-  return directory.trim();
-}
-
-async function promptForRepositoryConfirmation(repositories: RepositoryGroup[]): Promise<boolean> {
+async function confirmRepositories(repositories: RepositoryGroup[]) {
   note(
     repositories
-      .map(
-        (repository) =>
-          `${repository.name} (${repository.packages.join(", ")})\n${repository.cloneUrl}`,
-      )
+      .map(({ name, packages, cloneUrl }) => `${name} (${packages.join(", ")})\n${cloneUrl}`)
       .join("\n\n"),
     "Git repositories",
   );
-  const proceed = await confirm({
-    message: "Clone these Git repositories?",
-    initialValue: true,
-  });
+  const proceed = await confirmChoice(
+    "Clone these Git repositories?",
+    "Operation cancelled. No repositories were cloned.",
+  );
+  if (!proceed) {
+    abort("Operation cancelled. No repositories were cloned.");
+  }
+}
 
-  if (isCancel(proceed) || !proceed) {
-    cancel("Operation cancelled. No repositories were cloned.");
+const confirmChoice = (message: string, cancelMessage?: string) =>
+  ask(confirm({ message, initialValue: true }), cancelMessage);
+
+async function confirmUpdate(name: string) {
+  const value = await confirm({
+    message: `${name} already exists. Update it?`,
+    initialValue: false,
+  });
+  if (isCancel(value)) {
+    cancel("Update skipped.");
     return false;
   }
-
-  return true;
+  return value;
 }
 
-async function promptForAgentsReference(): Promise<boolean | null> {
-  const addReference = await confirm({
-    message: "Add the package reference index to AGENTS.md?",
-    initialValue: true,
-  });
-
-  if (isCancel(addReference)) {
-    cancel("Operation cancelled.");
-    return null;
+async function ask<T>(answer: Promise<T | symbol>, message = "Operation cancelled.") {
+  const value = await answer;
+  if (isCancel(value)) {
+    abort(message);
   }
-
-  return addReference;
+  return value as T;
 }
 
-async function addAgentsReference(cwd: string, indexPath: string): Promise<void> {
-  const agentsPath = join(cwd, "AGENTS.md");
-  const contents = (await pathExists(agentsPath)) ? await readFile(agentsPath, "utf8") : "";
-  const relativeIndexPath = relative(cwd, indexPath)
-    .split(sep)
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-  await writeFile(agentsPath, renderAgentsReference(contents, relativeIndexPath), "utf8");
-  console.log(`Updated ${agentsPath}`);
+function abort(message: string): never {
+  cancel(message);
+  throw CANCELLED;
 }
 
-async function runCommand(command: string, args: string[]): Promise<CommandResult> {
-  return await new Promise((resolveCommand, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.once("error", reject);
-    child.once("close", (code) => {
-      resolveCommand({ code: code ?? 1, stderr, stdout });
-    });
-  });
+function stop(message: string): never {
+  console.log(message);
+  throw CANCELLED;
 }
 
-async function pathExists(path: string): Promise<boolean> {
+async function addAgentsReference(cwd: string, indexPath: string) {
+  const path = join(cwd, "AGENTS.md");
+  const link = relative(cwd, indexPath).split(sep).map(encodeURIComponent).join("/");
+  await writeFile(path, renderAgentsReference((await readOptional(path)) ?? "", link));
+  console.log(`Updated ${path}`);
+}
+
+async function git(args: string[], cwd?: string) {
   try {
-    await access(path, constants.F_OK);
+    const { stdout, stderr } = await exec("git", args, { cwd, encoding: "utf8" });
+    return { ok: true, output: (stderr || stdout).trim() };
+  } catch (error) {
+    const result = error as Error & { stderr?: string; stdout?: string };
+    return {
+      ok: false,
+      output: (result.stderr || result.stdout || result.message).trim(),
+    };
+  }
+}
+
+async function readOptional(path: string) {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function exists(path: string) {
+  try {
+    await access(path);
     return true;
   } catch {
     return false;
   }
-}
-
-async function removeFailedClone(destination: string): Promise<void> {
-  if (await pathExists(join(destination, ".git"))) {
-    await rm(destination, { force: true, recursive: true });
-  }
-}
-
-function commandError(result: CommandResult): string {
-  return result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -14,6 +14,16 @@ import {
   repositoryFromMetadata,
 } from "../src/core.ts";
 
+const fixtures = join(import.meta.dirname, "fixtures");
+const target = join(fixtures, "target");
+const section = (name: string, packageName: string, link: string) => `## ${name}
+
+Packages: \`${packageName}\`
+
+- [reference](${link})`;
+const index = (...sections: string[]) =>
+  `${INDEX_MARKER}\n\n# Package references\n\n${sections.join("\n\n")}\n`;
+
 test("core discovers dependencies from the repository package.json fixture", async () => {
   const manifest = await readManifest(join(import.meta.dirname, "..", "package.json"));
 
@@ -97,7 +107,6 @@ test("rejects basename collisions from different repositories", () => {
 });
 
 test("finds and renders docs and examples deterministically", async () => {
-  const target = join(import.meta.dirname, "fixtures", "target");
   const repository = join(target, "sample");
 
   expect(await findReferenceDirectories(repository, target)).toEqual([
@@ -116,13 +125,10 @@ test("finds and renders docs and examples deterministically", async () => {
   expect(index).toContain("Packages: `sample`, `sample-core`");
   expect(index).toContain("[docs](./sample/docs)");
   expect(index).toContain("[packages/widget/examples](./sample/packages/widget/examples)");
-  expect(index).not.toContain("start.md");
-  expect(index).not.toContain("basic.mdx");
-  expect(index).not.toContain("ignored.md");
+  expect(index).not.toMatch(/start\.md|basic\.mdx|ignored\.md/);
 });
 
 test("links the repository root when it has no docs or examples", async () => {
-  const target = join(import.meta.dirname, "fixtures", "target");
   const repository = join(target, "empty");
 
   const index = await renderIndex(
@@ -133,40 +139,16 @@ test("links the repository root when it has no docs or examples", async () => {
 });
 
 test("merges rerun output without losing previous repository sections", () => {
-  const existing = `${INDEX_MARKER}
-
-# Package references
-
-## alpha
-
-Packages: \`alpha\`
-
-- [docs](./alpha/docs)
-
-## shared
-
-Packages: \`old-package\`
-
-- [docs](./shared/docs)
-`;
-  const generated = `${INDEX_MARKER}
-
-# Package references
-
-## beta
-
-Packages: \`beta\`
-
-- [examples](./beta/examples)
-
-## shared
-
-Packages: \`new-package\`
-
-- [examples](./shared/examples)
-`;
-
-  const merged = mergeIndexes(existing, generated);
+  const merged = mergeIndexes(
+    index(
+      section("alpha", "alpha", "./alpha/docs"),
+      section("shared", "old-package", "./shared/docs"),
+    ),
+    index(
+      section("beta", "beta", "./beta/examples"),
+      section("shared", "new-package", "./shared/examples"),
+    ),
+  );
 
   expect(merged).toContain("## alpha");
   expect(merged).toContain("## beta");
@@ -177,7 +159,7 @@ Packages: \`new-package\`
 });
 
 test("reports malformed manifests with their path", async () => {
-  const manifestPath = join(import.meta.dirname, "fixtures", "malformed-package.txt");
+  const manifestPath = join(fixtures, "malformed-package.txt");
 
   await expect(readManifest(manifestPath)).rejects.toThrow(
     `Invalid package manifest at ${manifestPath}`,

@@ -38,9 +38,8 @@ Both commands resolve `--dir` from the current working directory and default to
   `--pkgs`.
 - It discovers immediate child directories containing `.git` under the target;
   other files and directories are ignored.
-- Repositories are processed in lexical order. Each clean worktree runs
-  `git pull --ff-only --prune`, updating its checked-out branch from the
-  configured upstream without rewriting history.
+- Clean repositories run `git pull --ff-only --prune`, updating their
+  checked-out branches from configured upstreams without rewriting history.
 - Dirty repositories are preserved and reported as failures. Inspection or
   pull failures do not stop remaining repositories.
 - A missing target or target without clones is a successful no-op. Any skipped
@@ -48,7 +47,9 @@ Both commands resolve `--dir` from the current working directory and default to
 
 ## Repositories
 
-Repository metadata is resolved from npm. Repositories are normalized and
+Repository metadata is read from each installed package's `package.json`, with
+the npm registry as a fallback for packages not present in `node_modules`.
+Repositories are normalized and
 deduplicated by URL, then shallow-cloned from their current default branch.
 Clone directories use the repository basename; conflicting basenames are
 reported before any clone is created.
