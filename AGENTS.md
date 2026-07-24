@@ -14,3 +14,13 @@ Docs are local at `node_modules/vite-plus/docs` or online at https://viteplus.de
 - [ ] If setup, runtime, or package-manager behavior looks wrong, run `vp env doctor` and include its output when asking for help.
 
 <!--VITE PLUS END-->
+
+<!-- PKGREF START -->
+
+## Package references
+
+Before working with dependency APIs, consult the
+[package reference index](docs/pkg-reference/INDEX.md).
+It links to cloned upstream documentation and examples.
+
+<!-- PKGREF END -->
