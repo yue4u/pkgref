@@ -1,6 +1,6 @@
 {
   "name": "pkgref",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Clone dependency source repositories and index their docs and examples.",
   "homepage": "https://github.com/yue4u/pkgref#readme",
   "bugs": {
@@ -29,8 +29,7 @@
     "dev": "vp pack --watch",
     "test": "vp test",
     "check": "vp check",
-    "prepublishOnly": "vp run build",
-    "prepare": "vp config"
+    "prepublishOnly": "vp run build"
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0"
@@ -42,14 +41,8 @@
     "vite": "catalog:",
     "vite-plus": "catalog:"
   },
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "11.17.0",
-      "onFail": "download"
-    }
-  },
   "engines": {
     "node": ">=24"
-  }
+  },
+  "packageManager": "pnpm@11.17.0"
 }

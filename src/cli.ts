@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { parseArgs, promisify } from "node:util";
@@ -401,6 +402,6 @@ async function exists(path: string) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.filename === realpathSync(process.argv[1])) {
   process.exitCode = await runCli();
 }

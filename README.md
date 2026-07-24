@@ -10,7 +10,7 @@ Requires Node.js 24+ and Git.
 Run from a project containing `package.json`:
 
 ```sh
-pnpm dlx pkgref
+npx pkgref
 ```
 
 Use the arrow keys to navigate, Space to select packages, and Enter to confirm.
@@ -20,14 +20,14 @@ pkgref then shows the Git URLs, asks for a target directory (default:
 Skip prompts by supplying packages and a target:
 
 ```sh
-pnpm dlx pkgref --pkgs=react,vitest --dir docs/pkg-reference
+npx pkgref --pkgs=react,vitest --dir docs/pkg-reference
 ```
 
 Update every clean clone in the target:
 
 ```sh
-pnpm dlx pkgref update
-pnpm dlx pkgref update --dir docs/other-references
+npx pkgref update
+npx pkgref update --dir docs/other-references
 ```
 
 ## Output

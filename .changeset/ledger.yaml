@@ -2,3 +2,7 @@ pkgref@0.0.1:
   dir: ""
   intents:
     - olive-pigs-unite
+pkgref@0.0.2:
+  dir: ""
+  intents:
+    - kind-eggs-sing
