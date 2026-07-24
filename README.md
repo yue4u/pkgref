@@ -1,40 +1,54 @@
 # pkgref
 
-[GitHub repository](https://github.com/yue4u/pkgref)
+Clone dependency source repositories and generate a local index of their docs
+and examples for coding agents and humans.
+
+Requires Node.js 24+ and Git.
+
+## Usage
+
+Run from a project containing `package.json`:
 
 ```sh
 pnpm dlx pkgref
-# list package.json deps in interactive mode for select and clone repo to target dir (default to docs/pkg-reference).
-pnpm dlx pkgref --pkgs=react,vitest --dir docs/repo
-# specify pkg and dir to clone with cli param
-pnpm dlx pkgref update
-# fast-forward all clones in docs/pkg-reference
 ```
 
-## Features
+Use the arrow keys to navigate, Space to select packages, and Enter to confirm.
+pkgref then shows the Git URLs, asks for a target directory (default:
+`docs/pkg-reference`), and offers to link the index from `AGENTS.md`.
 
-- list docs/example dir in cloned repo to root as index markdown for search
+Skip prompts by supplying packages and a target:
 
-## Future
+```sh
+pnpm dlx pkgref --pkgs=react,vitest --dir docs/pkg-reference
+```
 
-- support more than package.json
+Update every clean clone in the target:
+
+```sh
+pnpm dlx pkgref update
+pnpm dlx pkgref update --dir docs/other-references
+```
+
+## Output
+
+Repositories are shallow-cloned and deduplicated. `INDEX.md` links to nested
+`doc`, `docs`, `example`, and `examples` directories, or to the repository root
+when none exist. Reruns preserve earlier index entries.
+
+pkgref never overwrites a user-owned index or unrelated path. Existing clones
+with local changes are left untouched. Failures return a nonzero exit code
+without discarding successful work.
+
+See [SPEC.md](./SPEC.md) for the full behavioral contract.
 
 ## Development
 
-- Install dependencies:
-
-```bash
+```sh
 vp install
-```
-
-- Run the unit tests:
-
-```bash
+vp check
 vp test
-```
-
-- Build the library:
-
-```bash
 vp pack
 ```
+
+[GitHub](https://github.com/yue4u/pkgref)

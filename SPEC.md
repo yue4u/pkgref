@@ -1,8 +1,18 @@
-# pkgref v1 specification
+# pkgref v1 behavioral specification
 
-`pkgref` reads dependency names from the current directory's `package.json`,
-lets the user select packages, clones their source repositories, and creates a
-searchable documentation index.
+This document is the implementation and testing contract for maintainers.
+User-facing guidance and examples belong in [README.md](./README.md).
+
+`pkgref` discovers dependency source repositories, maintains local shallow
+clones, and generates a deterministic reference index without modifying cloned
+content.
+
+## Requirements
+
+- The runtime is Node.js 24 or newer.
+- Git is available on `PATH`.
+- The clone command runs from a project root containing `package.json`.
+- The update command requires only its target directory.
 
 ## CLI
 
@@ -31,6 +41,9 @@ Both commands resolve `--dir` from the current working directory and default to
 - Explicit undeclared package names are accepted with a warning.
 - The clone command requires a valid project-root `package.json`. Supplying
   `--pkgs` skips all interactive prompts.
+- An empty interactive selection exits successfully without creating files.
+- Cancellation at any interactive prompt exits successfully without continuing
+  to later prompts or filesystem changes.
 
 ### Update command
 
@@ -47,10 +60,18 @@ Both commands resolve `--dir` from the current working directory and default to
 
 ## Repositories
 
-Repository metadata is read from each installed package's `package.json`, with
-the npm registry as a fallback for packages not present in `node_modules`.
-Repositories are normalized and
-deduplicated by URL, then shallow-cloned from their current default branch.
+Repository metadata is read first from
+`node_modules/<package-name>/package.json`, including scoped package paths. This
+uses the exact installed package version and makes installed-package resolution
+offline. If the package is not installed, metadata is fetched from
+`https://registry.npmjs.org/<encoded-name>/latest`.
+
+The `repository` field may be a string or an object with a `url` property.
+GitHub shorthands, SCP-style SSH URLs, `git+` prefixes, and `git://` URLs are
+normalized. Only HTTP, HTTPS, and SSH clone URLs are accepted. Repositories are
+deduplicated by normalized host and path, then shallow-cloned from their current
+default branch.
+
 Clone directories use the repository basename; conflicting basenames are
 reported before any clone is created.
 
@@ -85,6 +106,11 @@ External commands receive argument arrays without shell interpolation. A
 failure to resolve, clone, update, or index a repository is reported and makes
 the process exit nonzero. Successful repositories are retained and indexed.
 Skipping an existing repository is not an error.
+
+No operation uses a temporary directory. Observable output is written only to
+the selected target and, when confirmed, the project-root `AGENTS.md`.
+
+## Non-goals
 
 Version-specific checkouts, forced resets, full-history clones, manifests other
 than `package.json`, private-registry configuration, and custom documentation
