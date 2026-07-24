@@ -1,6 +1,6 @@
 {
   "name": "pkgref",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Clone dependency source repositories and index their docs and examples.",
   "homepage": "https://github.com/yue4u/pkgref#readme",
   "bugs": {

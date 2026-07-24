@@ -1,4 +1,7 @@
 node_modules
+!tests/fixtures/project/node_modules/
+!tests/fixtures/project/node_modules/example-package/
+!tests/fixtures/project/node_modules/example-package/package.json
 dist
 /docs/pkg-reference/
 *.log

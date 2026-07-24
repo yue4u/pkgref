@@ -22,6 +22,8 @@ import {
 import type { IndexRepository, RegistryPackage, RepositoryGroup } from "./types.ts";
 
 const exec = promisify(execFile);
+type GitResult = { ok: boolean; output: string };
+type GitRunner = (args: string[], cwd?: string) => Promise<GitResult>;
 const DEFAULT_DIR = "docs/pkg-reference";
 const CANCELLED = Symbol("cancelled");
 const OPTIONS = {
@@ -202,16 +204,17 @@ export async function resolveRepository(packageName: string, cwd: string) {
   return repositoryFromMetadata((await response.json()) as RegistryPackage);
 }
 
-async function processRepository(
+export async function processRepository(
   group: RepositoryGroup,
   target: string,
+  runGit: GitRunner = git,
 ): Promise<{ failed: boolean; index?: IndexRepository }> {
   const root = join(target, group.name);
   const index = { directory: group.name, packages: group.packages, root };
 
   if (!(await exists(root))) {
     console.log(`Cloning ${group.name} (${group.packages.join(", ")})...`);
-    const result = await git(["clone", "--depth", "1", "--", group.cloneUrl, root]);
+    const result = await runGit(["clone", "--depth", "1", "--", group.cloneUrl, root]);
     if (!result.ok) {
       console.error(`Failed to clone ${group.name}: ${result.output}`);
       return { failed: true };
@@ -219,7 +222,7 @@ async function processRepository(
     return { failed: false, index };
   }
 
-  const invalidReason = await invalidCloneReason(root, group);
+  const invalidReason = await invalidCloneReason(root, group, runGit);
   if (invalidReason) {
     console.warn(`Skipping ${group.name}: ${invalidReason}`);
     return { failed: false };
@@ -229,12 +232,17 @@ async function processRepository(
     return { failed: false, index };
   }
 
-  const update = await pullRepository(root, group.name);
+  const update = await pullRepository(root, group.name, false, runGit);
   return { failed: update === "failed", index };
 }
 
-async function pullRepository(root: string, name: string, prune = false) {
-  const status = await git(["status", "--porcelain"], root);
+export async function pullRepository(
+  root: string,
+  name: string,
+  prune = false,
+  runGit: GitRunner = git,
+) {
+  const status = await runGit(["status", "--porcelain"], root);
   if (!status.ok) {
     console.error(`Failed to inspect ${name}: ${status.output}`);
     return "failed" as const;
@@ -245,7 +253,7 @@ async function pullRepository(root: string, name: string, prune = false) {
   }
 
   console.log(`Updating ${name}...`);
-  const pull = await git(["pull", "--ff-only", ...(prune ? ["--prune"] : [])], root);
+  const pull = await runGit(["pull", "--ff-only", ...(prune ? ["--prune"] : [])], root);
   if (!pull.ok) {
     console.error(`Failed to update ${name}: ${pull.output}`);
     return "failed" as const;
@@ -254,8 +262,12 @@ async function pullRepository(root: string, name: string, prune = false) {
   return "updated" as const;
 }
 
-async function invalidCloneReason(root: string, expected: RepositoryGroup) {
-  const origin = await git(["remote", "get-url", "origin"], root);
+export async function invalidCloneReason(
+  root: string,
+  expected: RepositoryGroup,
+  runGit: GitRunner = git,
+) {
+  const origin = await runGit(["remote", "get-url", "origin"], root);
   if (!origin.ok) {
     return "the destination is not a Git clone with an origin";
   }
